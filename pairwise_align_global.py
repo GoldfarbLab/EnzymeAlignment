@@ -4,7 +4,7 @@ import os
 import subprocess
 from Bio import SeqIO, AlignIO
 from math import floor, ceil
-from seed_protein import SeedProtein
+from seed_protein import SeedProtein, MatchedResidue
 import util
 import time
 import tempfile
@@ -15,95 +15,121 @@ import shutil
 # Functions
 ########################################################################################################################
 
-
 def align_all_seeds(seed_id2proteins, candidate, out_path, job_id, min_alignment_identity_threshold):
 
     candidate_prefix_path = os.path.join(out_path, str(job_id), util.fasta_id_to_filename(candidate.id))
     candidate_fasta_path = os.path.join(out_path, str(job_id), util.fasta_id_to_fasta_filename(candidate.id))
 
-    candidate_fasta_written = False
+    seed_id2residues = dict()
+    processed_seed_ids = set()
+    seed_ids_grouped_by_residues = []
 
     for seed in seed_id2proteins.values():
         if (len(candidate.seq) * min_alignment_identity_threshold > len(seed.seq) or  # too long
                 len(candidate.seq) < len(seed.seq) * min_alignment_identity_threshold):  # too short
             continue
 
-        # if the candidate passes the sequence length thresholds, only write the candidate fasta file once
-        if not candidate_fasta_written:
-            #SeqIO.write(candidate, candidate_fasta_path, "fasta")
-            candidate_fasta_written = True
+        matching_residues = align_to_seed(seed, util.protein2fasta_str(candidate),
+                                          candidate_prefix_path, min_alignment_identity_threshold)
 
-        align_to_seed(seed, ">" + candidate.id + "\n" + str(candidate.seq), candidate_prefix_path, candidate_fasta_path, min_alignment_identity_threshold)
+        if matching_residues:
+            seed_id2residues[seed.id] = matching_residues
+
+    # group seeds together if they led to identical conserved residues. This cleans up the output.
+    for seed_id in seed_id2residues:
+        if seed_id in processed_seed_ids:
+            continue
+
+        seed_ids_grouped_by_residues.append([[seed_id], seed_id2residues[seed_id]])
+        processed_seed_ids.add(seed_id)
+
+        for seed_id2 in seed_id2residues:
+            if seed_id2 in processed_seed_ids:
+                continue
+
+            if seed_id2residues[seed_id2] == seed_id2residues[seed_id]:
+                seed_ids_grouped_by_residues[-1][0].append(seed_id2)
+                processed_seed_ids.add(seed_id2)
+
+    # write results
+    for group in seed_ids_grouped_by_residues:
+        print(group[0], [hit.matched_external_index for hit in group[1]])
 
 
-def align_to_seed(seed, candidate_str, candidate_prefix_path, candidate_fasta_path, min_alignment_identity_threshold):
+def align_to_seed(seed, candidate_str, candidate_prefix_path, min_alignment_identity_threshold):
 
     aln_path = candidate_prefix_path + "_vs_" + util.fasta_id_to_filename(seed.id) + ".aln.txt"
 
     with tempfile.SpooledTemporaryFile(max_size=1e6, mode="w+") as aln_file:
         p = subprocess.Popen(["stretcher",
-                         "-bsequence", seed.fasta_path,
-                         # "-asequence", seed.fasta_path,
-                         # "-bsequence", candidate_fasta_path,
-                         # "-outfile", aln_path,
-                         "-gapopen", "1",
-                         "-gapextend", "1",
-                         "-aformat3", "pair",
-                         "-auto",
-                         "-filter",
-                         "-sprotein1",
-                         "-sprotein2"], stdout=aln_file, stdin=subprocess.PIPE, universal_newlines=True)
+                              "-bsequence", seed.fasta_path,
+                              "-gapopen", "1",
+                              "-gapextend", "1",
+                              "-aformat3", "srspair",
+                              "-auto",
+                              "-filter",
+                              "-sprotein1",
+                              "-sprotein2"], stdout=aln_file, stdin=subprocess.PIPE, universal_newlines=True)
 
         p.communicate(input=candidate_str)
-
-        #print(candidate_fasta_path)
 
         # check if the candidate passes the sequence identity threshold
         aln_file.seek(0)
         for line in aln_file:
             if line.startswith("# Identity: "):
                 identity = float(line.rstrip().split("(")[-1][0:-2]) / 100.0
-                #print(identity)
                 if identity < min_alignment_identity_threshold:
-                    return
+                    return False
                 break
 
         # check for conserved residues
         aln_file.seek(0)
         alignment = AlignIO.read(aln_file, "emboss")
 
-        seed_seq_index = 0
-        candidate_seq_index = 0
-        last_conserved_index_match = 0
+        seed_seq_index = -1
+        candidate_seq_index = -1
+        last_conserved_index_match = -1
 
-        for i in range(0, len(alignment[0].seq)):
-            if alignment[1].seq[i] != "-":
+        matched_residues = []
+
+        seed_aln_seq = alignment[1].seq
+        candidate_aln_seq = alignment[0].seq
+        aln_length = len(seed_aln_seq)
+
+        for i in range(0, aln_length):
+            if candidate_aln_seq[i] != "-":
                 candidate_seq_index += 1
-            if alignment[0].seq[i] != "-":
+            if seed_aln_seq[i] != "-":
                 seed_seq_index += 1
                 if seed_seq_index in seed.index2conserved_residue:
                     conserved_residue = seed.index2conserved_residue[seed_seq_index]
 
                     # Find closest match in allowable subsequence. Tie breaks go to the left.
                     min_index = max(0, i - conserved_residue.n_term_tolerance, last_conserved_index_match)
-                    max_index = min(len(alignment[0].seq)-1, i + conserved_residue.c_term_tolerance) + 1
+                    max_index = min(aln_length-1, i + conserved_residue.c_term_tolerance) + 1
 
                     best_match_dist = max(conserved_residue.n_term_tolerance, conserved_residue.c_term_tolerance) + 1
                     match_index = -1
                     for j in range(min_index, max_index+1):
                         dist = abs(i - j)
-                        if alignment[1].seq[j] in conserved_residue.allowed_aa and dist < best_match_dist:
+                        if candidate_aln_seq[j] in conserved_residue.allowed_aa and dist < best_match_dist:
                             best_match_dist = dist
-                            match_index = candidate_seq_index
+                            match_index = j
                             last_conserved_index_match = i
 
                     if match_index == -1:
-                        return
+                        return False
+                    else:
+                        matched_residues.append(MatchedResidue(conserved_residue.seed_aa, conserved_residue.index,
+                                                               candidate_aln_seq[match_index], match_index,
+                                                               match_index - candidate_seq_index))
 
         # if the candidate passes all criteria, write the alignment file to disk
         with open(aln_path, 'w') as aln_file_permanent:
             aln_file.seek(0)
             shutil.copyfileobj(aln_file, aln_file_permanent)
+
+            return matched_residues
 
 
 ########################################################################################################################
@@ -125,6 +151,7 @@ num_jobs = int(sys.argv[6])
 # output
 out_path = sys.argv[7]
 index_outfile = open(sys.argv[8], 'w')
+
 
 ########################################################################################################################
 # Initialize
@@ -154,7 +181,6 @@ for line in seed_index_file:
 
         seed_id2proteins[seed_id].add_conserved_residue(seed_aa, int(external_index), allowed_aa,
                                                         int(n_term_tolerance), int(c_term_tolerance))
-
 
 
 ########################################################################################################################

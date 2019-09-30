@@ -2,12 +2,21 @@ import sys
 
 
 class ConservedResidue:
-    def __init__(self, seed_aa, index, allowed_aa, n_term_tolerance, c_term_tolerance):
+    def __init__(self, seed_aa, external_index, allowed_aa, n_term_tolerance, c_term_tolerance):
         self.seed_aa = seed_aa
-        self.index = index
+        self.index = external_index - 1
         self.allowed_aa = allowed_aa
         self.n_term_tolerance = n_term_tolerance
         self.c_term_tolerance = c_term_tolerance
+
+
+class MatchedResidue:
+    def __init__(self, original_residue, original_index, matched_residue, matched_index, offset):
+        self.original_residue = original_residue
+        self.original_external_index = original_index + 1
+        self.matched_residue = matched_residue
+        self.matched_external_index = matched_index + 1
+        self.offset = offset
 
 
 class SeedProtein:
@@ -34,3 +43,5 @@ class SeedProtein:
                                      max_index=max(self.index2conserved_residue) + 1))
 
         self.index2conserved_residue[index] = ConservedResidue(seed_aa, index, allowed_aa, n_term_tolerance, c_term_tolerance)
+
+
