@@ -15,10 +15,8 @@ import shutil
 # Functions
 ########################################################################################################################
 
-def align_all_seeds(seed_id2proteins, candidate, out_path, job_id, min_alignment_identity_threshold):
-
-    candidate_prefix_path = os.path.join(out_path, str(job_id), util.fasta_id_to_filename(candidate.id))
-    candidate_fasta_path = os.path.join(out_path, str(job_id), util.fasta_id_to_fasta_filename(candidate.id))
+def align_all_seeds(seed_id2proteins, candidate, min_alignment_identity_threshold,
+                    alignment_root_out_path, residues_root_out_path, fasta_root_out_path):
 
     seed_id2residues = dict()
     processed_seed_ids = set()
@@ -29,8 +27,8 @@ def align_all_seeds(seed_id2proteins, candidate, out_path, job_id, min_alignment
                 len(candidate.seq) < len(seed.seq) * min_alignment_identity_threshold):  # too short
             continue
 
-        matching_residues = align_to_seed(seed, util.protein2fasta_str(candidate),
-                                          candidate_prefix_path, min_alignment_identity_threshold)
+        matching_residues = align_to_seed(seed, candidate,
+                                          alignment_root_out_path, min_alignment_identity_threshold)
 
         if matching_residues:
             seed_id2residues[seed.id] = matching_residues
@@ -51,14 +49,17 @@ def align_all_seeds(seed_id2proteins, candidate, out_path, job_id, min_alignment
                 seed_ids_grouped_by_residues[-1][0].append(seed_id2)
                 processed_seed_ids.add(seed_id2)
 
-    # write results
-    for group in seed_ids_grouped_by_residues:
-        print(group[0], [hit.matched_external_index for hit in group[1]])
+    # write results: fasta and conserved residues
+    if len(seed_id2residues) > 0:
+        SeqIO.write(candidate, os.path.join(fasta_root_out_path, candidate.id + ".fasta"), 'fasta')
+        write_matching_conserved_residues(candidate, seed_ids_grouped_by_residues,
+                                          os.path.join(residues_root_out_path, candidate.id + "_conserved_residues.txt"))
 
 
-def align_to_seed(seed, candidate_str, candidate_prefix_path, min_alignment_identity_threshold):
+def align_to_seed(seed, candidate, alignment_root_out_path, min_alignment_identity_threshold):
 
-    aln_path = candidate_prefix_path + "_vs_" + util.fasta_id_to_filename(seed.id) + ".aln.txt"
+    aln_path = os.path.join(alignment_root_out_path,
+                            util.fasta_id_to_filename(candidate.id) + "_vs_" + util.fasta_id_to_filename(seed.id) + ".aln.txt")
 
     with tempfile.SpooledTemporaryFile(max_size=1e6, mode="w+") as aln_file:
         p = subprocess.Popen(["stretcher",
@@ -71,7 +72,7 @@ def align_to_seed(seed, candidate_str, candidate_prefix_path, min_alignment_iden
                               "-sprotein1",
                               "-sprotein2"], stdout=aln_file, stdin=subprocess.PIPE, universal_newlines=True)
 
-        p.communicate(input=candidate_str)
+        p.communicate(input=util.protein2fasta_str(candidate))
 
         # check if the candidate passes the sequence identity threshold
         aln_file.seek(0)
@@ -122,7 +123,7 @@ def align_to_seed(seed, candidate_str, candidate_prefix_path, min_alignment_iden
                     else:
                         matched_residues.append(MatchedResidue(conserved_residue.seed_aa, conserved_residue.index,
                                                                candidate_aln_seq[match_index], match_index,
-                                                               match_index - candidate_seq_index))
+                                                               match_index - i))
 
         # if the candidate passes all criteria, write the alignment file to disk
         with open(aln_path, 'w') as aln_file_permanent:
@@ -130,6 +131,19 @@ def align_to_seed(seed, candidate_str, candidate_prefix_path, min_alignment_iden
             shutil.copyfileobj(aln_file, aln_file_permanent)
 
             return matched_residues
+
+
+def write_matching_conserved_residues(candidate, seed_ids_grouped_by_residues, out_path):
+    out_file = open(out_path, "w")
+
+    out_file.write("CANDIDATE: " + candidate.id + "\n")
+
+    for group in seed_ids_grouped_by_residues:
+        out_file.write("SEEDS: " + ", ".join(group[0]) + "\n")
+
+        for cr in group[1]:
+            out_file.write(cr.original_residue + str(cr.original_external_index) + " -> " +
+                           cr.matched_residue + str(cr.matched_external_index) + " OFFSET: " + str(cr.offset) + "\n")
 
 
 ########################################################################################################################
@@ -149,19 +163,24 @@ job_id = int(sys.argv[5]) - 1
 num_jobs = int(sys.argv[6])
 
 # output
-out_path = sys.argv[7]
-index_outfile = open(sys.argv[8], 'w')
+alignment_root_out_path = sys.argv[7]
+residues_root_out_path = sys.argv[8]
+fasta_root_out_path = sys.argv[9]
 
 
 ########################################################################################################################
 # Initialize
 ########################################################################################################################
 
-job_out_path = os.path.join(out_path, str(job_id))
-
 # create directory for job output
-if not os.path.exists(job_out_path):
-    os.mkdir(job_out_path)
+if not os.path.exists(alignment_root_out_path):
+    os.mkdir(alignment_root_out_path)
+
+if not os.path.exists(residues_root_out_path):
+    os.mkdir(residues_root_out_path)
+
+if not os.path.exists(fasta_root_out_path):
+    os.mkdir(fasta_root_out_path)
 
 # read fasta files
 db_sequences = SeqIO.parse(db_fasta_file, 'fasta')
@@ -191,7 +210,8 @@ start_time = time.perf_counter()
 
 for i, candidate in enumerate(db_sequences):
     if (i % num_jobs) == job_id:
-        align_all_seeds(seed_id2proteins, candidate, out_path, job_id, min_alignment_identity_threshold)
+        align_all_seeds(seed_id2proteins, candidate, min_alignment_identity_threshold,
+                        alignment_root_out_path, residues_root_out_path, fasta_root_out_path)
 
 end_time = time.perf_counter()
 
